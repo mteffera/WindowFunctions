@@ -18,6 +18,76 @@ Flag accounts where:
 3 or more transactions occur within 5 minutes, AND
 The total amount in that window exceeds $10,000
 
+SOL
+
+WITH transaction_with_tt AS (select 
+  acct_id,
+  amount,
+  txn_type,
+  txn_time,
+  TRUNC(txn_time, "TT") AS time_only
+  from transactions
+  ORDER BY acct_id,txn_type,txn_time, time_only
+)
+
+select 
+  acct_id,
+  txn_type,
+  txn_time,
+  CASE 
+    WHEN 
+      ((00:05 >(time_only - LAG(time_only) OVER (PARTITION BY acct_id,txn_type ORDER BY txn_time ROWS BETWEEN 2 PRECEDING and CURRENT ROW)) &
+        (SUM(amount) OVER (PARTITION BY acct_id,txn_type ORDER BY txn_time ROWS BETWEEN 2 PRECEDING and CURRENT ROW) > 10000)
+    THEN 1
+    ELSE 0
+  END AS flag
+  from transaction_with_tt
+  where flag > 0;
+
+Correct 
+
+WITH transactions_with_window AS (
+    SELECT
+        acct_id,
+        txn_time,
+        amount,
+        txn_type,
+
+        -- Sum of amounts in the last 5 minutes
+        SUM(amount) OVER (
+            PARTITION BY acct_id
+            ORDER BY txn_time
+            RANGE BETWEEN INTERVAL '5' MINUTE PRECEDING AND CURRENT ROW
+        ) AS amount_last_5_min,
+
+        -- Count of transactions in the last 5 minutes
+        COUNT(*) OVER (
+            PARTITION BY acct_id
+            ORDER BY txn_time
+            RANGE BETWEEN INTERVAL '5' MINUTE PRECEDING AND CURRENT ROW
+        ) AS txn_count_last_5_min
+    FROM transactions
+)
+
+SELECT
+    acct_id,
+    txn_time,
+    amount,
+    txn_type,
+    amount_last_5_min,
+    txn_count_last_5_min,
+    CASE
+        WHEN txn_count_last_5_min >= 3
+         AND amount_last_5_min > 10000
+        THEN 1
+        ELSE 0
+    END AS suspicious_flag
+FROM transactions_with_window
+WHERE txn_count_last_5_min >= 3
+   OR amount_last_5_min > 10000
+ORDER BY acct_id, txn_time;
+
+
 
 Banking Question 2 — Running Balance with Overdraft Detection
 account_balance(acct_id, txn_time, amount)
