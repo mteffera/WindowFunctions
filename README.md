@@ -23,6 +23,8 @@ Compute cumulative oil production since the start of the year
 **SOL**
 select well_id, prod_date, oil_bbl, SUM(oil_bbl) OVER (ORDER BY prod_date ROWS BETWEEN 6 PRECEDING AND CURRENT ROW) as 7‑day_moving_average_oil, ABS(LAG(oil_bbl) OVER (ORDER BY  prod_date) - oill_bbl) /100 as change_percentage, SUM(oil_bbl) OVER (ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) as cumulative_oil_production from well_production;
 
+**Correct**
+
 SELECT
     well_id,
     prod_date,
@@ -61,6 +63,7 @@ ORDER BY well_id, prod_date;
 O&G Question 2 — Detect Production Drop Events
 
 A “production drop event” is when: oil_bbl_today < 0.8 * oil_bbl_yesterday
+
 Task
 Write a query that:
 Identifies all drop events
@@ -68,7 +71,72 @@ Shows the previous day’s production
 Shows the % drop
 Flags wells with 3 consecutive drop days (use windowed COUNT)
 
+**SOL**
 
+select 
+    well_id,
+    prod_date,
+    oil_bbl,
+    IF (oil_bbl < (0.8* (LAG(oil_bbl) OVER (PARTATION BY well_id ORDER BY prod_date)))) THEN DROP ELSE NULL ,
+    LAG(oil_bbl) OVER (PARTATION BY well_id ORDER BY prod_date) as previous_day_production,
+    (oil_bbl - (LAG(oil_bbl) OVER (PARTATION BY well_id ORDER BY prod_date)))/(LAG(oil_bbl) OVER (PARTATION BY well_id ORDER BY prod_date))*100 as persont_droop
+    COUNT(
+    oil_bbl < (0.8* (LAG(oil_bbl) OVER (PARTATION BY well_id ORDER BY prod_date)))
+    ) OVER (PARTITION BY well_id ORDER BY prod_date ROWS BETWEEN 2 PRECEDING AND CURRENT ROW) as flag_droop from well_production
+ORDER BY well_id, prod_date;
+    
+**Correct** 
+
+    SELECT
+    well_id,
+    prod_date,
+    oil_bbl,
+
+    -- Previous day's production
+    LAG(oil_bbl) OVER (
+        PARTITION BY well_id
+        ORDER BY prod_date
+    ) AS previous_day_production,
+
+    -- Drop flag (1 = drop event)
+    CASE
+        WHEN oil_bbl < 0.8 * LAG(oil_bbl) OVER (
+            PARTITION BY well_id
+            ORDER BY prod_date
+        ) THEN 1
+        ELSE 0
+    END AS drop_event,
+
+    -- Percent change vs previous day
+    ROUND(
+        (oil_bbl - LAG(oil_bbl) OVER (
+            PARTITION BY well_id
+            ORDER BY prod_date
+        )) /
+        NULLIF(LAG(oil_bbl) OVER (
+            PARTITION BY well_id
+            ORDER BY prod_date
+        ), 0) * 100,
+        2
+    ) AS percent_drop,
+
+    -- Count of drop events in last 3 days (including today)
+    SUM(
+        CASE
+            WHEN oil_bbl < 0.8 * LAG(oil_bbl) OVER (
+                PARTITION BY well_id
+                ORDER BY prod_date
+            ) THEN 1
+            ELSE 0
+        END
+    ) OVER (
+        PARTITION BY well_id
+        ORDER BY prod_date
+        ROWS BETWEEN 2 PRECEDING AND CURRENT ROW
+    ) AS drop_streak_3_days
+
+FROM well_production
+ORDER BY well_id, prod_date;
 
 O&G Question 3 — Monthly Allocation of Production to Tanks
 Tables: 
@@ -85,6 +153,74 @@ Window frames
 Gaps and islands logic
 Possibly recursive CTE (Oracle)
 
+SELECT
+    well_id,
+    tank_id,
+    oil_bbl,
+    ROUND((capacity_bbl - SUM(oil_bbl) OVER (PARTITION BY well_id ORDER BY prod_date))/NULLIF((SUM(oil_bbl) OVER (PARTITION BY well_id ORDER BY prod_date),0)*100,2) as tank_percentage_filled_with_oil
+FROM well_production 
+ORDER BY well_id, tank_id;
+
+**Correct** 
+
+WITH production_with_running_totals AS (
+    SELECT
+        well_id,
+        prod_date,
+        oil_bbl,
+        SUM(oil_bbl) OVER (
+            PARTITION BY well_id
+            ORDER BY prod_date
+        ) AS running_total_oil_bbl
+    FROM production
+),
+
+tanks_with_running_capacity AS (
+    SELECT
+        well_id,
+        tank_id,
+        capacity_bbl,
+        SUM(capacity_bbl) OVER (
+            PARTITION BY well_id
+            ORDER BY tank_id
+        ) AS running_total_capacity_bbl
+    FROM tanks
+),
+
+oil_allocated_to_each_tank AS (
+    SELECT
+        p.well_id,
+        p.prod_date,
+        p.oil_bbl,
+        t.tank_id,
+        t.capacity_bbl,
+
+        -- Allocation logic:
+        -- 1. Determine how much oil has reached this tank
+        -- 2. Cannot exceed tank capacity
+        -- 3. Cannot be negative
+        LEAST(
+            GREATEST(
+                p.running_total_oil_bbl
+                - (t.running_total_capacity_bbl - t.capacity_bbl),
+                0
+            ),
+            t.capacity_bbl
+        ) AS oil_allocated_to_tank
+    FROM production_with_running_totals p
+    CROSS JOIN tanks_with_running_capacity t
+    WHERE p.running_total_oil_bbl >
+          (t.running_total_capacity_bbl - t.capacity_bbl)
+)
+
+SELECT
+    well_id,
+    prod_date,
+    tank_id,
+    oil_allocated_to_tank
+FROM oil_allocated_to_each_tank
+WHERE oil_allocated_to_tank > 0
+ORDER BY well_id, prod_date, tank_id;
 
 
 O&G Question 4 — Find Top 3 Wells by Monthly Production
