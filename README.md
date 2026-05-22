@@ -1,5 +1,28 @@
 # WindowFunctions
 
+
+Function	Purpose
+LAG()	Previous row
+LEAD()	Next row
+ROW_NUMBER()	Unique sequence
+RANK()	Ranking with gaps
+DENSE_RANK()	Ranking without gaps
+NTILE()	Buckets/percentiles
+FIRST_VALUE()	First value in window
+LAST_VALUE()	Last value in window
+Frame clauses	Control window size
+
+
+ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING
+
+ROWS BETWEEN 3 PRECEDING AND 1 PRECEDING
+
+ROWS BETWEEN 2 PRECEDING AND CURRENT ROW
+
+ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+
+
+
 COMPLEX SQL QUESTIONS — OIL & GAS INDUSTRY
 
 O&G Question 1 — Daily Production + 7‑Day Rolling Average
@@ -229,3 +252,70 @@ For each month:
 Rank wells by total oil
 Return only the top 3 wells per month
 Use RANK() or DENSE_RANK()
+
+WITH production_with_running_totals AS (
+    SELECT
+        well_id,
+        prod_date,
+        oil_bbl,
+        SUM(oil_bbl) OVER (
+            PARTITION BY well_id
+            ORDER BY prod_date
+        ) AS running_total_oil_bbl
+    FROM production),
+    rank_wells_total_oil AS (
+        select  
+            well_id,
+            prod_date,
+            oil_bbl,
+            RANK(running_total_oil_bbl) OVER (PARTITION BY well_id ORDER BY prod_date) as rank_wells_totaloil
+            from production_with_running_totals
+    )
+    
+select 
+    well_id,
+    prod_date,
+    rank_wells_totaloil,
+    from rank_wells_total_oil
+    ORDER by rank_wells_totaloil DESC 
+    LIMIT(3);
+
+
+
+    **Correct** 
+
+    WITH monthly_production AS (
+    SELECT
+        well_id,
+        TRUNC(prod_date, 'MM') AS month_start,
+        SUM(oil_bbl) AS total_monthly_oil
+    FROM production
+    GROUP BY
+        well_id,
+        TRUNC(prod_date, 'MM')
+),
+
+ranked_wells AS (
+    SELECT
+        well_id,
+        month_start,
+        total_monthly_oil,
+        RANK() OVER (
+            PARTITION BY month_start
+            ORDER BY total_monthly_oil DESC
+        ) AS monthly_rank
+    FROM monthly_production
+)
+
+SELECT
+    well_id,
+    month_start,
+    total_monthly_oil,
+    monthly_rank
+FROM ranked_wells
+WHERE monthly_rank <= 3
+ORDER BY month_start, monthly_rank;
+
+    
+
+    
