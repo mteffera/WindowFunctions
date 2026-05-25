@@ -107,6 +107,86 @@ Overdraft events (balance < 0)
 Duration of overdraft (LEAD on timestamp)
 Total overdraft time per account
 
+WITH overdraft_balance as (
+select 
+  acct_id, 
+  txn_time, 
+  amount,
+  SUM(amount) OVER (BARTITION BY acct_id ORDER BY txn_time) as running_balance,
+  CASE WHEN 
+    amount < 0
+    THEN 1
+    ELSE 0
+  END as overdraft
+  from account_balance;
+)
+
+select  
+  acct_id, 
+  txn_time, 
+  amount,
+  running_balance,
+  overdraft,
+  LEAD(overdraft) OVER (PARTITION BY acct_id ORDER BY txn_time)
+  from overdraft_balance;
+
+Correct 
+
+WITH running_balance AS (
+    SELECT
+        acct_id,
+        txn_time,
+        amount,
+        SUM(amount) OVER (
+            PARTITION BY acct_id
+            ORDER BY txn_time
+        ) AS running_balance
+    FROM account_balance
+),
+
+overdraft_events AS (
+    SELECT
+        acct_id,
+        txn_time,
+        amount,
+        running_balance,
+
+        CASE
+            WHEN running_balance < 0 THEN 1
+            ELSE 0
+        END AS overdraft_flag,
+
+        LEAD(txn_time) OVER (
+            PARTITION BY acct_id
+            ORDER BY txn_time
+        ) AS next_txn_time
+    FROM running_balance
+),
+
+overdraft_durations AS (
+    SELECT
+        acct_id,
+        txn_time,
+        amount,
+        running_balance,
+        overdraft_flag,
+        next_txn_time,
+
+        CASE
+            WHEN overdraft_flag = 1 AND next_txn_time IS NOT NULL
+            THEN next_txn_time - txn_time
+            ELSE INTERVAL '0' SECOND
+        END AS overdraft_duration
+    FROM overdraft_events
+)
+
+SELECT
+    acct_id,
+    SUM(overdraft_duration) AS total_overdraft_time
+FROM overdraft_durations
+GROUP BY acct_id
+ORDER BY acct_id;
+
 
 Banking Question 3 — Customer Lifetime Value (CLV)
 customers(customer_id, join_date)
@@ -120,12 +200,188 @@ Compute spend in the last 90 days
 Compute % change vs previous 90‑day period
 Rank customers by CLV
 
+WITH tmp as (select 
+  customer_id,
+  amount,
+  txn_date,
+  SUM(amount) OVER (PARTITION BY customer_id ORDER BY txn_date) total_spend,
+  AVG(amount) OVER (PARTITION BY customer_id ORDER BY txn_date RANGE BETWEEN INTERVAL MONTH PRECEDING AND NEXT MONTH) as average_monthly_spend,
+  SUM(amount) OVER (PARTITION BY customer_id ORDER BY txn_date RANGE BETWEEN INTERVAL '90' DAY PRECEDING AND CURRENT ROW) last_90_days_total_spend
+from transactions;)
+
+select 
+  t.customer_id,
+  c.join_date
+  t.amount,
+  t.txn_date,
+  t.total_spend,
+  t.average_monthly_spend,
+  t.last_90_days_total_spend,
+  ROUND((last_90_days_total_spend - (LAG(last_90_days_total_spend) OVER (PARTITION BY customer_id ORDER BY txn_date)))/NULLIF(last_90_days_total_spend,0)*100,2) as percentage_change,
+  RANK(last_90_days_total_spend) OVER ( PARTITION BY customer_id ORDER BY last_90_days_total_spend DESC) as rank_customers 
+  from tmp t
+  inner join customers c on t.customer_id=c.customer_id
+  ORDER BY t.customer_id, c.join_date;
+
+
+Correct 
+
+WITH monthly_spend AS (
+    SELECT
+        customer_id,
+        TRUNC(txn_date, 'MM') AS month_start,
+        SUM(amount) AS monthly_total
+    FROM transactions
+    GROUP BY
+        customer_id,
+        TRUNC(txn_date, 'MM')
+),
+
+customer_metrics AS (
+    SELECT
+        customer_id,
+
+        -- Total lifetime spend
+        SUM(monthly_total) AS total_spend,
+
+        -- Average monthly spend
+        AVG(monthly_total) AS avg_monthly_spend
+    FROM monthly_spend
+    GROUP BY customer_id
+),
+
+rolling_90 AS (
+    SELECT
+        customer_id,
+        txn_date,
+        SUM(amount) OVER (
+            PARTITION BY customer_id
+            ORDER BY txn_date
+            RANGE BETWEEN INTERVAL '90' DAY PRECEDING AND CURRENT ROW
+        ) AS spend_last_90,
+        LAG(
+            SUM(amount) OVER (
+                PARTITION BY customer_id
+                ORDER BY txn_date
+                RANGE BETWEEN INTERVAL '90' DAY PRECEDING AND CURRENT ROW
+            )
+        ) OVER (
+            PARTITION BY customer_id
+            ORDER BY txn_date
+        ) AS prev_90
+    FROM transactions
+),
+
+clv_final AS (
+    SELECT
+        r.customer_id,
+        MAX(r.spend_last_90) AS spend_last_90,
+        MAX(r.prev_90) AS prev_90
+    FROM rolling_90 r
+    GROUP BY r.customer_id
+)
+
+SELECT
+    c.customer_id,
+    cust.join_date,
+    m.total_spend,
+    m.avg_monthly_spend,
+    f.spend_last_90,
+    f.prev_90,
+    ROUND(
+        (f.spend_last_90 - f.prev_90)
+        / NULLIF(f.prev_90, 0) * 100,
+        2
+    ) AS pct_change_90,
+    RANK() OVER (
+        ORDER BY m.total_spend DESC
+    ) AS clv_rank
+FROM customer_metrics m
+JOIN clv_final f ON m.customer_id = f.customer_id
+JOIN customers cust ON cust.customer_id = m.customer_id
+ORDER BY clv_rank;
+
 
 Banking Question 4 — Find Consecutive Deposit Streaks
 deposits(acct_id, deposit_date, amount)
 
 Task
 Find streaks where:
-Customer deposited money every day
+The customer deposited money every day
 For at least 5 consecutive days
 Return streak start, streak end, streak length
+
+WITH streak_table as (select 
+  acct_id,
+  deposit_date,
+  TRUNC(deposit_date, 'DD') as deposit_day,
+  COUNT() OVER (PARTITION BY acct_id ORDER BY deposit_date RANGE BETWEEN INTERVAL '5' DAY PRECEDING AND PRECEDING DAY) as streak,
+from deposits;)
+
+select 
+   acct_id,
+  deposit_date,
+  CASE WHEN streak>0 AND LAG(streak) OVER (PARTITION BY acct_id ORDER BY deposit_date)<1 THEN deposit_date ELSE 0 END as startdate
+  CASE WHEN streak<0 AND LAG(streak) OVER (PARTITION BY acct_id ORDER BY deposit_date)>1 THEN deposit_date ELSE 0 END as enddate
+from deposits;
+
+
+Correct 
+
+WITH deposits_with_lag AS (
+    SELECT
+        acct_id,
+        deposit_date,
+        amount,
+        LAG(deposit_date) OVER (
+            PARTITION BY acct_id
+            ORDER BY deposit_date
+        ) AS prev_date
+    FROM deposits
+),
+
+gap_flag AS (
+    SELECT
+        acct_id,
+        deposit_date,
+        amount,
+        CASE
+            WHEN prev_date IS NULL THEN 1
+            WHEN deposit_date - prev_date = 1 THEN 0
+            ELSE 1
+        END AS is_new_streak
+    FROM deposits_with_lag
+),
+
+streak_groups AS (
+    SELECT
+        acct_id,
+        deposit_date,
+        amount,
+        SUM(is_new_streak) OVER (
+            PARTITION BY acct_id
+            ORDER BY deposit_date
+        ) AS streak_group
+    FROM gap_flag
+),
+
+streak_lengths AS (
+    SELECT
+        acct_id,
+        streak_group,
+        MIN(deposit_date) AS streak_start,
+        MAX(deposit_date) AS streak_end,
+        COUNT(*) AS streak_length
+    FROM streak_groups
+    GROUP BY acct_id, streak_group
+)
+
+SELECT
+    acct_id,
+    streak_start,
+    streak_end,
+    streak_length
+FROM streak_lengths
+WHERE streak_length >= 5
+ORDER BY acct_id, streak_start;
+
